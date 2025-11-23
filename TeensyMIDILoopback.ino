@@ -4,7 +4,7 @@
 #include "bitmaps.h"
 #include "fonts.h"
 #include "helpers.h"
-#include "constants.h"
+#include "constants.cpp"
 
 // --- USB Host / Device setup ---
 USBHost myusb;
@@ -16,6 +16,10 @@ Encoder knob(ENCODER_A, ENCODER_B);
 U8G2_SH1106_128X64_NONAME_F_HW_I2C display(U8G2_R0, U8X8_PIN_NONE);
 
 int currentParam = 1; // Expression
+ParamValue currentParamValues[MAX_CHANNEL_COUNT][NUM_PARAMS];
+
+int currentChannel = 0; // Actually 1, but 0-indexed
+char channelBuffer[40];
 
 // --- State ---
 long lastPosition = 0;
@@ -27,10 +31,18 @@ bool potArmed = false;
 int lastSentValue = -1;
 int beforeDisarmingValue = -1;
 
-int currentChannel = 0;
-char channelBuffer[20];
-
 int currentScreen = 1;
+
+
+void initParamAndChannels() {
+  for (int ch = 0; ch < MAX_CHANNEL_COUNT; ch++) {
+    for (int i = 0; i < NUM_PARAMS; i++) {
+      currentParamValues[ch][i].cc = defaultParamValues[i].cc;
+      currentParamValues[ch][i].value = defaultParamValues[i].value;
+    }
+  }
+}
+
 
 // --- UI ---
 void drawLegacyScreen() {
@@ -42,14 +54,14 @@ void drawLegacyScreen() {
 
   display.setFont(u8g2_font_fub11_tf);
   display.setCursor(0, 32);
-  display.print(params[currentParam].name);
+  display.print(nameCCmapping[currentParam].name);
 
   char ccstr[16];
-  sprintf(ccstr, "CC %d", params[currentParam].cc);
+  sprintf(ccstr, "CC %d", currentParamValues[currentChannel][currentParam].cc);
   display.setFont(u8g2_font_6x10_tf);
   display.drawStr(0, 48, ccstr);
 
-  int val = params[currentParam].value;
+  int val = currentParamValues[currentChannel][currentParam].value;
   int barWidth = map(val, 0, 127, 0, 120);
   display.drawFrame(4, 54, 120, 8);
   display.drawBox(4, 54, barWidth, 8);
@@ -66,14 +78,15 @@ void drawLegacyScreen() {
 void drawEffectsScreen() {
   display.clearBuffer();
 
-  int val = params[currentParam].value;
+  int val = currentParamValues[currentChannel][currentParam].value;
 
   int pot_pos = map(127 - val, 0, 127, 6, 50);
   display.drawXBMP(111, 2, 16, 60, pot_channel_bitmap_);
   display.drawXBMP(116, pot_pos, 8, 7, pot_knob_bitmap_);
 
   display.setFont(BoldPixelsSmol);
-  char *truncatedName = truncate(params[currentParam].name, 13).c_str();
+  String temp = truncate(nameCCmapping[currentParam].name, 13).c_str();
+  const char *truncatedName = temp.c_str();
 	display.drawStr(1, 10, truncatedName);
 	int stringwidth = display.getStrWidth(truncatedName);
 	display.drawBox(1, 12, stringwidth, 1);
@@ -106,8 +119,9 @@ void drawScreen(int screen_id = currentScreen) {
 
 
 void sendParamToCasio(int idx) {
-  midiDevice.sendControlChange(params[idx].cc, params[idx].value, currentChannel + 1);
+  midiDevice.sendControlChange(currentParamValues[currentChannel][idx].cc, currentParamValues[currentChannel][idx].value, currentChannel + 1);
 }
+
 
 void setup() {
   Serial.begin(115200);
@@ -116,18 +130,20 @@ void setup() {
 
   myusb.begin();
   pinMode(ENCODER_SW, INPUT_PULLUP);
+  initParamAndChannels();
 
   display.begin();
 
   smoothedPot = analogRead(POT_PIN);
 
-  for (int i = 0; i < PARAM_COUNT; i++) {
+  for (int i = 0; i < NUM_PARAMS; i++) {
     sendParamToCasio(i);
     delay(5);
   }
 
   drawScreen();
 }
+
 
 int readSmoothedPotRaw() {
   int raw = analogRead(POT_PIN);
@@ -138,11 +154,11 @@ int readSmoothedPotRaw() {
   return cc;
 }
 
+
 void disarmPot(int potValue){
   beforeDisarmingValue = potValue;
   potArmed = false;
 }
-
 
 
 void loop() {
@@ -154,12 +170,12 @@ void loop() {
   //   int delta = newPos - lastPosition;
   //   lastPosition = newPos;
 
-  //   int v = params[currentParam].value + delta;
+  //   int v = currentParamValues[currentChannel][currentParam].value + delta;
   //   v = constrain(v, 0, 127);
-  //   if (v != params[currentParam].value) {
-  //     params[currentParam].value = v;
+  //   if (v != currentParamValues[currentChannel][currentParam].value) {
+  //     currentParamValues[currentChannel][currentParam].value = v;
   //     sendParamToCasio(currentParam);
-  //     Serial.printf("CC%d (%s) -> %d\n", params[currentParam].cc, params[currentParam].name, v);
+  //     Serial.printf("CC%d (%s) -> %d\n", currentParamValues[currentChannel][currentParam].cc, nameCCmapping[currentParam].name, v);
   //     drawScreen();
   //   }
   // }
@@ -174,18 +190,18 @@ void loop() {
     lastPosition = newPos;
 
     disarmPot(potCC);
-    currentParam = (currentParam + PARAM_COUNT + delta) % PARAM_COUNT;
-    Serial.printf("Changing screens Delta:%d CurrentScreen:%s currentParam:%d\n", delta, params[currentParam].name, currentParam);
+    currentParam = (currentParam + NUM_PARAMS + delta) % NUM_PARAMS;
+    Serial.printf("Changing screens Delta:%d CurrentScreen:%s currentParam:%d\n", delta, nameCCmapping[currentParam].name, currentParam);
     drawScreen();
   }
 
 
   if (!potArmed) {
     // If pot is close enough to the current parameter, arm it (no jump)
-    // if (abs(potCC - params[currentParam].value) <= POT_PICKUP_THRESHOLD) {
+    // if (abs(potCC - currentParamValues[currentChannel][currentParam].value) <= POT_PICKUP_THRESHOLD) {
     //   potArmed = true;
     //   Serial.println("Pot armed for parameter.");
-    //   lastSentValue = params[currentParam].value;
+    //   lastSentValue = currentParamValues[currentChannel][currentParam].value;
     // }
 
     if (abs(beforeDisarmingValue - potCC) > POT_MOVE_THRESHOLD) {
@@ -197,11 +213,11 @@ void loop() {
 
   // Armed -> actually update if moved enough
   if (potArmed && abs(potCC - lastSentValue) > 0) {
-    params[currentParam].value = potCC;
+    currentParamValues[currentChannel][currentParam].value = potCC;
     lastSentValue = potCC;
     sendParamToCasio(currentParam);
     drawScreen();
-    // Serial.printf("Pot -> %s = %d\n", params[currentParam].name, potCC);
+    // Serial.printf("Pot -> %s = %d\n", currentParamValues[currentChannel][currentParam].name, potCC);
   }
 
   // --- Short press to cycle parameter ---
